@@ -595,6 +595,13 @@ func (ch *ConversationsHandler) ConversationsSearchHandler(ctx context.Context, 
 	}
 	ch.logger.Debug("Search params parsed", zap.String("query", params.query), zap.Int("limit", params.limit), zap.Int("page", params.page))
 
+	if ch.apiProvider.IsOAuth() {
+		return ch.searchMessagesOAuth(ctx, params)
+	}
+	return ch.searchMessagesEdge(ctx, params)
+}
+
+func (ch *ConversationsHandler) searchMessagesOAuth(ctx context.Context, params *searchParams) (*mcp.CallToolResult, error) {
 	searchParams := slack.SearchParameters{
 		Sort:          slack.DEFAULT_SEARCH_SORT,
 		SortDirection: slack.DEFAULT_SEARCH_SORT_DIR,
@@ -612,6 +619,41 @@ func (ch *ConversationsHandler) ConversationsSearchHandler(ctx context.Context, 
 	messages := ch.convertMessagesFromSearch(messagesRes.Matches)
 	if len(messages) > 0 && messagesRes.Pagination.Page < messagesRes.Pagination.PageCount {
 		nextCursor := fmt.Sprintf("page:%d", messagesRes.Pagination.Page+1)
+		messages[len(messages)-1].Cursor = base64.StdEncoding.EncodeToString([]byte(nextCursor))
+	}
+	return marshalMessagesToCSV(messages)
+}
+
+func (ch *ConversationsHandler) searchMessagesEdge(ctx context.Context, params *searchParams) (*mcp.CallToolResult, error) {
+	items, pagination, err := ch.apiProvider.Slack().SearchMessages(ctx, params.query, params.limit, params.page)
+	if err != nil {
+		ch.logger.Error("Edge SearchMessages failed", zap.Error(err))
+		return nil, err
+	}
+	ch.logger.Debug("Edge search completed", zap.Int("matches", len(items)))
+
+	// Convert edge MessageItems to slack.SearchMessage so we can reuse convertMessagesFromSearch.
+	// Edge search does not return attachments; blocks are raw JSON and cannot be mapped
+	// to slack.Blocks without custom parsing — HasMedia will be false for edge results.
+	matches := make([]slack.SearchMessage, 0, len(items))
+	for _, item := range items {
+		matches = append(matches, slack.SearchMessage{
+			Type:      item.Type,
+			User:      item.User,
+			Username:  item.Username,
+			Text:      item.Text,
+			Timestamp: item.Timestamp,
+			Permalink: item.Permalink,
+			Channel: slack.CtxChannel{
+				ID:   item.Channel.ID,
+				Name: item.Channel.Name,
+			},
+		})
+	}
+
+	messages := ch.convertMessagesFromSearch(matches)
+	if len(messages) > 0 && pagination.Page < pagination.PageCount {
+		nextCursor := fmt.Sprintf("page:%d", pagination.Page+1)
 		messages[len(messages)-1].Cursor = base64.StdEncoding.EncodeToString([]byte(nextCursor))
 	}
 	return marshalMessagesToCSV(messages)

@@ -16,7 +16,27 @@ import (
 
 const perPage = 100
 
+const defaultMessageSearchCount = 20
+
 var ErrPagination = errors.New("pagination fault")
+
+// MessageItem represents a single message result from search.modules.messages.
+type MessageItem struct {
+	Type      string          `json:"type"`
+	User      string          `json:"user"`
+	Username  string          `json:"username"`
+	Text      string          `json:"text"`
+	Timestamp string          `json:"ts"`
+	Permalink string          `json:"permalink"`
+	Channel   MessageChannel  `json:"channel"`
+	Blocks    json.RawMessage `json:"blocks,omitempty"`
+}
+
+// MessageChannel is the channel info embedded in a message search result.
+type MessageChannel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
 
 type Channel struct {
 	slack.GroupConversation
@@ -188,4 +208,78 @@ func (cl *Client) SearchChannels(ctx context.Context, query string) ([]slack.Cha
 	trace.Logf(ctx, "info", "channels found=%d", len(cc))
 	lg.DebugContext(ctx, "channels", "count", len(cc))
 	return cc, nil
+}
+
+// SearchMessages searches messages using the edge search.modules.messages endpoint.
+// count controls results per page (0 uses default). page is 1-based (0 treated as 1).
+func (cl *Client) SearchMessages(ctx context.Context, query string, count, page int) ([]MessageItem, Pagination, error) {
+	ctx, task := trace.NewTask(ctx, "SearchMessages")
+	defer task.End()
+	lg := slog.With("in", "SearchMessages", "query", query)
+
+	trace.Logf(ctx, "params", "query=%q count=%d page=%d", query, count, page)
+
+	if count <= 0 {
+		count = defaultMessageSearchCount
+	}
+	if page <= 0 {
+		page = 1
+	}
+
+	clientReq, err := uuid.NewRandom()
+	if err != nil {
+		return nil, Pagination{}, err
+	}
+	browseID, err := uuid.NewRandom()
+	if err != nil {
+		return nil, Pagination{}, err
+	}
+
+	form := searchForm{
+		BaseRequest:          BaseRequest{Token: cl.token},
+		Module:               "messages",
+		Query:                query,
+		Page:                 page,
+		ClientReqID:          clientReq.String(),
+		BrowseID:             browseID.String(),
+		Extracts:             1,
+		Highlight:            0,
+		ExtraMsg:             1,
+		NoUserProfile:        0,
+		Count:                count,
+		FileTitleOnly:        false,
+		QueryRewriteDisabled: false,
+		IncludeFilesShares:   0,
+		Browse:               "standard",
+		SearchContext:        "search_tab",
+		MaxFilterSuggestions: 10,
+		Sort:                 sstRecommended,
+		SortDir:              ssdDesc,
+		ChannelType:          scpAll,
+		ExcludeMyChannels:    0,
+		SearchOnlyMyChannels: false,
+		WebClientFields: WebClientFields{
+			XReason:  "browser-query",
+			XMode:    "online",
+			XSonic:   true,
+			XAppName: "client",
+		},
+	}
+
+	const ep = "search.modules.messages"
+	resp, err := cl.PostForm(ctx, ep, values(form, true))
+	if err != nil {
+		return nil, Pagination{}, err
+	}
+	var sr SearchResponse[MessageItem]
+	if err := cl.ParseResponse(&sr, resp); err != nil {
+		return nil, Pagination{}, err
+	}
+	if err := sr.validate(ep); err != nil {
+		return nil, Pagination{}, err
+	}
+
+	trace.Logf(ctx, "info", "messages found=%d", len(sr.Items))
+	lg.DebugContext(ctx, "messages", "count", len(sr.Items), "total", sr.Pagination.TotalCount)
+	return sr.Items, sr.Pagination, nil
 }

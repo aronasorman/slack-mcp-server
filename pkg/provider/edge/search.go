@@ -20,22 +20,42 @@ const defaultMessageSearchCount = 20
 
 var ErrPagination = errors.New("pagination fault")
 
-// MessageItem represents a single message result from search.modules.messages.
-type MessageItem struct {
-	Type      string          `json:"type"`
+// MessageSearchItem represents a single item from search.modules.messages.
+// Each item wraps a channel and one or more messages within that channel.
+type MessageSearchItem struct {
+	IID      string                `json:"iid"`
+	Channel  MessageSearchChannel  `json:"channel"`
+	Messages []MessageSearchMsg    `json:"messages"`
+}
+
+// MessageSearchChannel is the channel info embedded in a message search result.
+type MessageSearchChannel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+// MessageSearchMsg is a single message inside a MessageSearchItem.
+type MessageSearchMsg struct {
+	Ts        string          `json:"ts"`
 	User      string          `json:"user"`
 	Username  string          `json:"username"`
 	Text      string          `json:"text"`
-	Timestamp string          `json:"ts"`
 	Permalink string          `json:"permalink"`
-	Channel   MessageChannel  `json:"channel"`
+	ThreadTs  string          `json:"thread_ts,omitempty"`
+	Type      string          `json:"type"`
 	Blocks    json.RawMessage `json:"blocks,omitempty"`
 }
 
-// MessageChannel is the channel info embedded in a message search result.
-type MessageChannel struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+// MessageItem is a flattened view of a message search result for consumers.
+type MessageItem struct {
+	Type      string
+	User      string
+	Username  string
+	Text      string
+	Timestamp string
+	Permalink string
+	ThreadTs  string
+	Channel   MessageSearchChannel
 }
 
 type Channel struct {
@@ -271,7 +291,7 @@ func (cl *Client) SearchMessages(ctx context.Context, query string, count, page 
 	if err != nil {
 		return nil, Pagination{}, err
 	}
-	var sr SearchResponse[MessageItem]
+	var sr SearchResponse[MessageSearchItem]
 	if err := cl.ParseResponse(&sr, resp); err != nil {
 		return nil, Pagination{}, err
 	}
@@ -279,7 +299,24 @@ func (cl *Client) SearchMessages(ctx context.Context, query string, count, page 
 		return nil, Pagination{}, err
 	}
 
-	trace.Logf(ctx, "info", "messages found=%d", len(sr.Items))
-	lg.DebugContext(ctx, "messages", "count", len(sr.Items), "total", sr.Pagination.TotalCount)
-	return sr.Items, sr.Pagination, nil
+	// Flatten the nested items[].messages[] structure into a flat list.
+	var items []MessageItem
+	for _, searchItem := range sr.Items {
+		for _, msg := range searchItem.Messages {
+			items = append(items, MessageItem{
+				Type:      msg.Type,
+				User:      msg.User,
+				Username:  msg.Username,
+				Text:      msg.Text,
+				Timestamp: msg.Ts,
+				Permalink: msg.Permalink,
+				ThreadTs:  msg.ThreadTs,
+				Channel:   searchItem.Channel,
+			})
+		}
+	}
+
+	trace.Logf(ctx, "info", "messages found=%d", len(items))
+	lg.DebugContext(ctx, "messages", "count", len(items), "total", sr.Pagination.TotalCount)
+	return items, sr.Pagination, nil
 }
